@@ -1,7 +1,7 @@
 AM_CXXFLAGS = -fpic \
 	      -Wall \
 	      -Wextra \
-	      -I$(top_srcdir)/src/lib/utils
+	      -Wno-unused-parameter
 
 noinst_LIBRARIES = libebus.a
 
@@ -9,10 +9,11 @@ libebus_a_SOURCES = result.cpp \
 		    result.h \
 		    symbol.cpp \
 		    symbol.h \
+		    filereader.h \
 		    data.cpp \
 		    data.h \
-		    port.cpp \
-		    port.h \
+		    device.cpp \
+		    device.h \
 		    message.cpp \
 		    message.h
 

@@ -1,5 +1,6 @@
 /*
- * Copyright (C) Roland Jax 2012-2014 <ebusd@liwest.at>
+ * Copyright (C) Roland Jax 2012-2014 <ebusd@liwest.at>,
+ * John Baier 2014-2015 <ebusd@johnm.de>
  *
  * This file is part of ebusd.
  *
@@ -26,30 +27,35 @@
 #include "thread.h"
 #include <string>
 
+/** \file network.h */
+
 using namespace std;
 
 /** forward declaration for class connection */
 class Connection;
 
 /**
- * @brief class for data/message transfer between connection and baseloop.
+ * class for data/message transfer between connection and baseloop.
  */
 class NetMessage
 {
 
 public:
 	/**
-	 * @brief constructs a new instance with message and source client address.
+	 * constructs a new instance with data received from the client.
 	 * @param data from client.
+	 * @param listening whether the client is in listening mode.
+	 * @param listenSince start timestamp of listening update.
 	 */
-	NetMessage(const string data) : m_data(data)
+	NetMessage(const string data, const bool listening, const time_t listenSince)
+		: m_data(data), m_resultSet(false), m_disconnect(false), m_listening(listening), m_listenSince(listenSince)
 	{
 		pthread_mutex_init(&m_mutex, NULL);
 		pthread_cond_init(&m_cond, NULL);
 	}
 
 	/**
-	 * @brief destructor.
+	 * destructor.
 	 */
 	~NetMessage()
 	{
@@ -57,59 +63,81 @@ public:
 		pthread_cond_destroy(&m_cond);
 	}
 
+private:
 	/**
-	 * @brief copy constructor.
-	 * @param src message object for copy.
+	 * Hidden copy constructor.
+	 * @param src the object to copy from.
 	 */
-	NetMessage(const NetMessage& src) : m_data(src.m_data) {}
+	NetMessage(const NetMessage& src);
+
+public:
 
 	/**
-	 * @brief get the data string.
+	 * get the data string.
 	 * @return the data string.
 	 */
 	string getData() const { return m_data; }
 
 	/**
-	 * @brief get the result string.
+	 * Wait for the result being set and return the result string.
 	 * @return the result string.
 	 */
-	string getResult() const { return m_result; }
-
-	/**
-	 * @brief set the result string.
-	 * @return the result string.
-	 */
-	void setResult(const string result) { m_result = result; }
-
-	/**
-	 * @brief wait on notification.
-	 */
-	void waitSignal()
+	string getResult()
 	{
 		pthread_mutex_lock(&m_mutex);
 
-		while (m_result.size() == 0)
+		while (!m_resultSet)
 			pthread_cond_wait(&m_cond, &m_mutex);
 
 		pthread_mutex_unlock(&m_mutex);
+
+		return m_result;
 	}
 
 	/**
-	 * @brief send notification.
+	 * Set the result string and notify the waiting thread.
+	 * @param result the result string.
+	 * @param listening whether the client is in listening mode.
+	 * @param listenUntil the end time to which to updates were added (exclusive).
+	 * @param disconnect true when the client shall be disconnected.
 	 */
-	void sendSignal()
+	void setResult(const string result, const bool listening, const time_t listenUntil, const bool disconnect)
 	{
+		m_result = result;
+		m_disconnect = disconnect;
+		m_listening = listening;
+		m_listenSince = listenUntil;
+		m_resultSet = true;
 		pthread_mutex_lock(&m_mutex);
 		pthread_cond_signal(&m_cond);
 		pthread_mutex_unlock(&m_mutex);
 	}
 
+	/**
+	 * Return whether the client is in listening mode.
+	 * @param listenSince set to the start time from which to add updates (inclusive).
+	 * @return whether the client is in listening mode.
+	 */
+	bool isListening(time_t& listenSince) { listenSince = m_listenSince; return m_listening; }
+
+	/**
+	 * Return whether the client shall be disconnected.
+	 * @return true when the client shall be disconnected.
+	 */
+	bool isDisconnect() { return m_disconnect; }
+
 private:
 	/** the data string */
 	string m_data;
 
+	/** whether the result was already set. */
+	bool m_resultSet;
+
 	/** the result string */
 	string m_result;
+
+	/** set to true when the client shall be disconnected. */
+	bool m_disconnect;
 
 	/** mutex variable for exclusive lock */
 	pthread_mutex_t m_mutex;
@@ -117,36 +145,43 @@ private:
 	/** condition variable for exclusive lock */
 	pthread_cond_t m_cond;
 
+	/** whether the client is in listening mode */
+	bool m_listening;
+
+	/** start timestamp of listening update */
+	time_t m_listenSince;
+
 };
 
 /**
- * @brief class connection which handle client and baseloop communication.
+ * class connection which handle client and baseloop communication.
  */
 class Connection : public Thread
 {
 
 public:
 	/**
-	 * @brief create a new connection instance.
+	 * create a new connection instance.
 	 * @param socket the tcp socket for communication.
 	 * @param netQueue the remote queue for network messages.
 	 */
 	Connection(TCPSocket* socket, WQueue<NetMessage*>* netQueue)
-		: m_socket(socket), m_netQueue(netQueue)
+		: m_socket(socket), m_netQueue(netQueue), m_listening(false)
 		{ m_id = ++m_ids; }
 
+	virtual ~Connection() { if (m_socket) delete m_socket; }
 	/**
-	 * @brief endless loop for connection instance.
+	 * endless loop for connection instance.
 	 */
 	virtual void run();
 
 	/**
-	 * @brief close active connection.
+	 * close active connection.
 	 */
 	virtual void stop() { m_notify.notify(); Thread::stop(); }
 
 	/**
-	 * @brief return own connection id.
+	 * return own connection id.
 	 * @return id of current connection.
 	 */
 	int getID() { return m_id; }
@@ -161,40 +196,44 @@ private:
 	/** notification object for shutdown procedure */
 	Notify m_notify;
 
-	/** id of current connection*/
+	/** id of current connection */
 	int m_id;
 
 	/** sumary for opened connections */
 	static int m_ids;
 
+	/** whether the client is in listening mode */
+	bool m_listening;
+
 };
 
 /**
- * @brief class network which listening on tcp socket for incoming connections.
+ * class network which listening on tcp socket for incoming connections.
  */
 class Network : public Thread
 {
 
 public:
 	/**
-	 * @brief create a network instance and listening for incoming connections.
+	 * create a network instance and listening for incoming connections.
 	 * @param local true to accept connections only for local host.
+	 * @param port the tcp port to listening.
 	 * @param netQueue the remote queue for network messages.
 	 */
-	Network(const bool local, WQueue<NetMessage*>* netQueue);
+	Network(const bool local, const int port, WQueue<NetMessage*>* netQueue);
 
 	/**
-	 * @brief destructor.
+	 * destructor.
 	 */
 	~Network();
 
 	/**
-	 * @brief endless loop for network instance.
+	 * endless loop for network instance.
 	 */
 	virtual void run();
 
 	/**
-	 * @brief shutdown network subsystem.
+	 * shutdown network subsystem.
 	 */
 	void stop() const { m_notify.notify(); usleep(100000); }
 
@@ -215,7 +254,7 @@ private:
 	bool m_listening;
 
 	/**
-	 * @brief clean inactive connections from container.
+	 * clean inactive connections from container.
 	 */
 	void cleanConnections();
 

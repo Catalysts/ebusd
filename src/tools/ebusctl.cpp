@@ -1,5 +1,6 @@
 /*
- * Copyright (C) Roland Jax 2012-2014 <ebusd@liwest.at>
+ * Copyright (C) Roland Jax 2012-2014 <ebusd@liwest.at>,
+ * John Baier 2014-2015 <ebusd@johnm.de>
  *
  * This file is part of ebusd.
  *
@@ -21,87 +22,266 @@
 #include <config.h>
 #endif
 
-#include "appl.h"
+#include <argp.h>
 #include "tcpsocket.h"
+#include <string.h>
+#include <cstdio>
 #include <iostream>
 #include <cstdlib>
 #include <sstream>
 
+#ifdef HAVE_PPOLL
+#include <poll.h>
+#endif
+
 using namespace std;
 
-Appl& A = Appl::Instance(true, true);
-
-void define_args()
+/** A structure holding all program options. */
+struct options
 {
-	A.setVersion("ebusctl is part of """PACKAGE_STRING"");
+	const char* server; //!< ebusd server host (name or ip) [localhost]
+	int port; //!< ebusd server port [8888]
 
-	A.addText(" 'ebusctl' is a tcp socket client for ebusd.\n\n"
-		  "Command: 'help' show available ebusd commands.\n\n"
-		  "Options:\n");
-
-	A.addOption("server", "s", OptVal("localhost"), dt_string, ot_mandatory,
-		    "name or ip (localhost)");
-
-	A.addOption("port", "p", OptVal(8888), dt_int, ot_mandatory,
-		    "port (8888)");
-
-}
-
-enum CommandType {
-     ct_open,
-     ct_exit,
-     ct_help,
-     ct_invalid
+	char* const *args; //!< arguments to pass to ebusd
+	int argCount; //!< number of arguments to pass to ebusd
 };
 
-CommandType getCase(const string& item)
-{
-	if (strcasecmp(item.c_str(), "OPEN") == 0) return ct_open;
-	if (strcasecmp(item.c_str(), "EXIT") == 0) return ct_exit;
-	if (strcasecmp(item.c_str(), "HELP") == 0) return ct_help;
+/** the program options. */
+static struct options opt = {
+	"localhost", // server
+	8888, // port
 
-	return ct_invalid;
+	NULL, // args
+	0 // argCount
+};
+
+/** the version string of the program. */
+const char *argp_program_version = "ebusctl of """PACKAGE_STRING"";
+
+/** the report bugs to address of the program. */
+const char *argp_program_bug_address = ""PACKAGE_BUGREPORT"";
+
+/** the documentation of the program. */
+static const char argpdoc[] =
+	"Client for acessing "PACKAGE" via TCP.\n"
+	"\v"
+	"If given, send COMMAND together with CMDOPT options to "PACKAGE".\n"
+	"Use 'help' as COMMAND for help on available "PACKAGE" commands.";
+
+/** the description of the accepted arguments. */
+static char argpargsdoc[] = "\nCOMMAND [CMDOPT...]";
+
+/** the definition of the known program arguments. */
+static const struct argp_option argpoptions[] = {
+	{NULL,       0,   NULL, 0, "Options:", 1 },
+	{"server", 's', "HOST", 0, "Connect to HOST running "PACKAGE" (name or IP) [localhost]", 0 },
+	{"port",   'p', "PORT", 0, "Connect to PORT on HOST [8888]", 0 },
+
+	{NULL,       0,   NULL, 0, NULL, 0 },
+};
+
+/**
+ * The program argument parsing function.
+ * @param key the key from @a argpoptions.
+ * @param arg the option argument, or NULL.
+ * @param state the parsing state.
+ */
+error_t parse_opt(int key, char *arg, struct argp_state *state)
+{
+	struct options *opt = (struct options*)state->input;
+	char* strEnd = NULL;
+	switch (key) {
+	// Device settings:
+	case 's': // --server=localhost
+		if (arg == NULL || arg[0] == 0) {
+			argp_error(state, "invalid server");
+			return EINVAL;
+		}
+		opt->server = arg;
+		break;
+	case 'p': // --port=8888
+		opt->port = strtol(arg, &strEnd, 10);
+		if (strEnd == NULL || *strEnd != 0 || opt->port < 1 || opt->port > 65535) {
+			argp_error(state, "invalid port");
+			return EINVAL;
+		}
+		break;
+	case ARGP_KEY_ARGS:
+		opt->args = state->argv + state->next;
+		opt->argCount = state->argc - state->next;
+		break;
+	default:
+		return ARGP_ERR_UNKNOWN;
+	}
+	return 0;
 }
 
-bool connect(const char* host, int port, bool once=true)
+string fetchData(TCPSocket* socket, bool& listening)
+{
+	char data[1024];
+	ssize_t datalen;
+	ostringstream ss;
+	string message;
+
+	int ret;
+	struct timespec tdiff;
+
+	// set timeout
+	tdiff.tv_sec = 0;
+	tdiff.tv_nsec = 1E8;
+
+#ifdef HAVE_PPOLL
+	int nfds = 2;
+	struct pollfd fds[nfds];
+
+	memset(fds, 0, sizeof(fds));
+
+	fds[0].fd = STDIN_FILENO;
+	fds[0].events = POLLIN;
+
+	fds[1].fd = socket->getFD();
+	fds[1].events = POLLIN;
+#else
+#ifdef HAVE_PSELECT
+	int maxfd;
+	fd_set checkfds;
+
+	FD_ZERO(&checkfds);
+	FD_SET(STDIN_FILENO, &checkfds);
+	FD_SET(socket->getFD(), &checkfds);
+
+	(STDIN_FILENO > socket->getFD()) ?
+		(maxfd = notify.notifyFD()) : (maxfd = socket->getFD());
+#endif
+#endif
+
+	while(true) {
+
+#ifdef HAVE_PPOLL
+		// wait for new fd event
+		ret = ppoll(fds, nfds, &tdiff, NULL);
+#else
+#ifdef HAVE_PSELECT
+		// set readfds to inital checkfds
+		fd_set readfds = checkfds;
+		// wait for new fd event
+		ret = pselect(maxfd + 1, &readfds, NULL, NULL, &tdiff, NULL);
+#endif
+#endif
+
+		bool newData = false;
+		bool newInput = false;
+		if (ret != 0) {
+#ifdef HAVE_PPOLL
+			// new data from notify
+			newInput = fds[0].revents & POLLIN;
+
+			// new data from socket
+			newData = fds[1].revents & POLLIN;
+#else
+#ifdef HAVE_PSELECT
+			// new data from notify
+			newInput = FD_ISSET(STDIN_FILENO, &readfds);
+
+			// new data from socket
+			newData = FD_ISSET(socket->getFD(), &readfds);
+#endif
+#endif
+		}
+
+			if (newData) {
+				if (socket->isValid()) {
+					datalen = socket->recv(data, sizeof(data));
+
+					if (datalen < 0) {
+						perror("recv");
+						break;
+					}
+
+					for (int i = 0; i < datalen; i++)
+						ss << data[i];
+
+					if ((ss.str().length() >= 2
+					&& ss.str()[ss.str().length()-2] == '\n'
+					&& ss.str()[ss.str().length()-1] == '\n')
+					|| listening)
+						break;
+
+				}
+				else
+					break;
+			}
+			else if (newInput) {
+				getline(cin, message);
+				message += '\n';
+
+				socket->send(message.c_str(), message.size());
+
+				if (strcasecmp(message.c_str(), "Q") == 0
+				|| strcasecmp(message.c_str(), "QUIT") == 0
+				|| strcasecmp(message.c_str(), "STOP") == 0)
+					exit(EXIT_SUCCESS);
+
+				message.clear();
+			}
+
+	}
+
+	return ss.str();
+}
+
+void connect(const char* host, int port, char* const *args, int argCount)
 {
 
 	TCPClient* client = new TCPClient();
 	TCPSocket* socket = client->connect(host, port);
 
+	bool once = args != NULL && argCount > 0;
 	if (socket != NULL) {
-
 		do {
 			string message;
+			bool listening = false;
 
-			if (once == false) {
+			if (!once) {
 				cout << host << ": ";
 				getline(cin, message);
 			}
 			else {
-				message = A.getCommand();
-				for (int i = 0; i < A.numArgs(); i++) {
-					message += " ";
-					message += A.getArg(i);
+				for (int i = 0; i < argCount; i++) {
+					if (i > 0)
+						message += " ";
+					bool quote = strchr(args[i], ' ') != NULL && strchr(args[i], '"') == NULL;
+					if (quote)
+						message += "\"";
+					message += args[i];
+					if (quote)
+						message += "\"";
 				}
 			}
 
 			socket->send(message.c_str(), message.size());
 
-			if (strncasecmp(message.c_str(), "QUIT", 4) != 0 && strncasecmp(message.c_str(), "STOP", 4) != 0) {
-
-				char data[1024];
-				size_t datalen;
-
-				datalen = socket->recv(data, sizeof(data)-1);
-				data[datalen] = '\0';
-
-				cout << data;
-			}
-			else
+			if (strcasecmp(message.c_str(), "Q") == 0
+			|| strcasecmp(message.c_str(), "QUIT") == 0
+			|| strcasecmp(message.c_str(), "STOP") == 0)
 				break;
 
-		} while (once == false);
+			if (message.length() > 0) {
+				if (strcasecmp(message.c_str(), "L") == 0
+				|| strcasecmp(message.c_str(), "LISTEN") == 0) {
+					listening = true;
+					while (listening && !cin.eof()) {
+						string result(fetchData(socket, listening));
+						cout << result;
+						if (strcasecmp(result.c_str(), "LISTEN STOPPED") == 0)
+							break;
+					}
+				}
+				else
+					cout << fetchData(socket, listening);
+			}
+
+		} while (!once && !cin.eof());
 
 		delete socket;
 
@@ -110,85 +290,16 @@ bool connect(const char* host, int port, bool once=true)
 		cout << "error connecting to " << host << ":" << port << endl;
 
 	delete client;
-
-	if (once == false)
-		return false;
-
-	return true;
 }
 
 int main(int argc, char* argv[])
 {
-	// define arguments and application variables
-	define_args();
+	struct argp argp = { argpoptions, parse_opt, argpargsdoc, argpdoc, NULL, NULL, NULL };
+	setenv("ARGP_HELP_FMT", "no-dup-args-note", 0);
+	if (argp_parse(&argp, argc, argv, ARGP_IN_ORDER, NULL, &opt) != 0)
+		return EINVAL;
 
-	// parse arguments
-	A.parseArgs(argc, argv);
-
-	if (A.missingCommand() == true) {
-		cout << "interactive mode started." << endl;
-
-		bool running = true;
-
-		do {
-			string input, token;
-			vector<string> cmd;
-
-			cout << "$: ";
-			getline(cin, input);
-
-			// prepare input
-			istringstream stream(input);
-			while (getline(stream, token, ' ') != 0)
-				cmd.push_back(token);
-
-			if (cmd.size() == 0)
-				cout << "command missing" << endl;
-
-			switch (getCase(cmd[0])) {
-			case ct_invalid:
-				cout << "command not found" << endl;
-				break;
-
-			case ct_open:
-				{
-					bool ret = true;
-					cout << "connect to..." << endl;
-					if (cmd.size() == 1)
-						ret = connect(A.getOptVal<const char*>("server"), A.getOptVal<int>("port"), false);
-					else if (cmd.size() == 2)
-						ret = connect(cmd[1].c_str(), A.getOptVal<int>("port"), false);
-					else if (cmd.size() == 3)
-						ret = connect(cmd[1].c_str(), atoi(cmd[2].c_str()), false);
-					else
-						cout << "open [host [port]]" << endl;
-
-					running = ret;
-				}
-
-				break;
-
-			case ct_exit:
-				running = false;
-				break;
-
-			case ct_help:
-				cout << "commands:" << endl
-				     << " open - open connection to ebusd   'open [host [port]]'" << endl
-				     << " exit - exit ebusctl" << endl
-				     << " help - print this page" << endl;
-				break;
-
-			default:
-				break;
-			}
-
-		} while (running == true);
-
-		exit(EXIT_SUCCESS);
-	}
-
-	connect(A.getOptVal<const char*>("server"), A.getOptVal<int>("port"));
+	connect(opt.server, opt.port, opt.args, opt.argCount);
 
 	exit(EXIT_SUCCESS);
 }

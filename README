@@ -1,66 +1,48 @@
-ebusd
------
+ebusd - eBUS daemon
+-------------------
 
-The ebusd provides a communication interface to the energy bus (ebus)
-which is used in various heating systems.
+ebusd is a daemon for handling communication with eBUS devices connected to a
+2-wire bus system ("energy bus" used by numerous heating systems).
 
 
 Features
 --------
 
- * send and receive ebus commands
- * collect data of cycle commands
- * poll commands and collect received data
- * scan ebus to identifies bus participants
- * dump raw data into binary files
+The main features of the daemon are:
 
- * available daemon commands:
-   - get            fetch data from ebus participant
-   - set            adjust data of ebus participant
-   - cyc            fetch data from collected cycle messages
-   - hex            send given hex value to ebus (ZZPBSBNNDx)
-
-   - scan           scan kown slave addresses (collected)
-   - scan full      scan all possible slave addresses
-   - scan result    show scanning results
-
-   - log areas      change log areas
-   - log level      change log level
-
-   - raw            toggle raw data logging
-   - dump           toggle raw data dumping
-
-   - reload         reload ebus configuration
-
-   - stop           stop daemon
-   - quit           close connection
-
-   - help           print help page
+ * actively send messages to and receive answers from the eBUS
+ * passively listen to messages sent on the eBUS
+ * regularly poll for messages
+ * scan for bus participants
+ * cache all data
+ * log messages and problems to a log file
+ * dump sent/received bytes to the log file
+ * dump received bytes to binary files for later playback/analysis
+ * listen for client connections on a dedicated TCP port
 
 
-vendor specific configuration files for ebusd
----------------------------------------------
+Installation
+------------
 
-See https://github.com/yuhu-/ebus-configuration
+Building ebusd from the source requires the following packages:
+ * autoconf (>=2.65)
+ * g++
+ * make
 
-
-Tools
------
-
- * 'ebusctl' is a tcp socket client for ebusd.
- * 'ebusfeed' is a tool to feed ebusd with raw data from dump files.
-
-
-Build
------
-
-$ ./autogen.sh [--prefix=/usr]
-$ make
-$ make install
+To start the build process, run these commands:
+./autogen.sh
+make install
 
 
+Documentation
+-------------
 
-For usage and further information take a look on help page.
+Usage instructions and further information can be found here:
+https://github.com/john30/ebusd/wiki
 
 
-The author can be contacted at ebusd@liwest.at.
+Contact
+-------
+For bugs and missing features use github issue system.
+
+The author can be contacted at ebusd@johnm.de .

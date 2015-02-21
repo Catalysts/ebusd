@@ -1,5 +1,5 @@
 /*
- * Copyright (C) John Baier 2014 <ebusd@johnm.de>
+ * Copyright (C) John Baier 2014-2015 <ebusd@johnm.de>
  *
  * This file is part of ebusd.
  *
@@ -25,7 +25,7 @@
 using namespace std;
 
 /**
- * @brief CRC8 lookup table for the polynom 0x9b = x^8 + x^7 + x^4 + x^3 + x^1 + 1.
+ * CRC8 lookup table for the polynom 0x9b = x^8 + x^7 + x^4 + x^3 + x^1 + 1.
  */
 static const unsigned char CRC_LOOKUP_TABLE[] =
 {
@@ -48,37 +48,35 @@ static const unsigned char CRC_LOOKUP_TABLE[] =
 };
 
 
-SymbolString::SymbolString(const string& str) //TODO use a factory method instead
-	: m_unescapeState(0), m_crc(0)
+void SymbolString::addAll(const SymbolString& str)
 {
-	// parse + escape
-	for (size_t i = 0; i+1 < str.size(); i += 2) {
-		unsigned long value = strtoul(str.substr(i, 2).c_str(), NULL, 16); // TODO check
-		push_back((unsigned char)value, false, true);
+	bool addCrc = m_unescapeState == 0;
+	bool isEscaped = str.m_unescapeState == 0;
+	vector<unsigned char> data = str.m_data;
+	for (size_t i = 0; i < data.size(); i++) {
+		push_back(data[i], isEscaped, addCrc);
 	}
-	// add CRC + escape
-	push_back(m_crc, false, false);
+	if (addCrc)
+		push_back(m_crc, false, false); // add CRC
 }
 
-SymbolString::SymbolString(const SymbolString& str, const bool escape, const bool addCrc)
-	: m_unescapeState(escape == true ? 0 : 1), m_crc(0)
+result_t SymbolString::parseHex(const string& str, const bool isEscaped)
 {
-	for (size_t i = 0; i < str.size(); i++) {
-		push_back(str[i], str.m_unescapeState == 0, true);
-	}
-	if (addCrc == true)
-		// add CRC
-		push_back(m_crc, false, false);
-}
+	bool addCrc = m_unescapeState == 0;
+	for (size_t i = 0; i < str.size(); i += 2) {
+		char* strEnd = NULL;
+		const char* strBegin = str.substr(i, 2).c_str();
+		unsigned int value = strtoul(strBegin, &strEnd, 16);
 
-SymbolString::SymbolString(const string& str, bool isEscaped)
-	: m_unescapeState(1), m_crc(0)
-{
-	// parse + optionally unescape
-	for (size_t i = 0; i+1 < str.size(); i += 2) {
-		unsigned long value = strtoul(str.substr(i, 2).c_str(), NULL, 16); // TODO check
-		push_back((unsigned char)value, isEscaped, false);
+		if (strEnd == NULL || *strEnd != 0 || strEnd != strBegin+2 || value > 0xff)
+			return RESULT_ERR_INVALID_NUM; // invalid value
+
+		push_back((unsigned char)value, isEscaped, addCrc);
 	}
+	if (addCrc)
+		push_back(m_crc, false, false); // add CRC
+
+	return RESULT_OK;
 }
 
 const string SymbolString::getDataStr(const bool unescape)
@@ -88,7 +86,7 @@ const string SymbolString::getDataStr(const bool unescape)
 
 	for (size_t i = 0; i < m_data.size(); i++) {
 		unsigned char value = m_data[i];
-		if (m_unescapeState == 0 && unescape == true && previousEscape == true) {
+		if (m_unescapeState == 0 && unescape && previousEscape) {
 			if (value == 0x00)
 				sstr << "a9"; // ESC
 			else if (value == 0x01)
@@ -98,7 +96,7 @@ const string SymbolString::getDataStr(const bool unescape)
 
 			previousEscape = false;
 		}
-		else if (m_unescapeState == 0 && unescape == true && value == ESC) {
+		else if (m_unescapeState == 0 && unescape && value == ESC) {
 			previousEscape = true; // escape sequence not yet finished
 		}
 		else {
@@ -113,7 +111,7 @@ const string SymbolString::getDataStr(const bool unescape)
 result_t SymbolString::push_back(const unsigned char value, const bool isEscaped, const bool updateCRC)
 {
 	if (m_unescapeState == 0) { // store escaped data
-		if (isEscaped == false && value == ESC) {
+		if (!isEscaped && value == ESC) {
 			m_data.push_back(ESC);
 			m_data.push_back(0x00);
 			if (updateCRC) {
@@ -121,7 +119,7 @@ result_t SymbolString::push_back(const unsigned char value, const bool isEscaped
 				addCRC(0x00);
 			}
 		}
-		else if (isEscaped == false && value == SYN) {
+		else if (!isEscaped && value == SYN) {
 			m_data.push_back(ESC);
 			m_data.push_back(0x01);
 			if (updateCRC) {
@@ -137,7 +135,7 @@ result_t SymbolString::push_back(const unsigned char value, const bool isEscaped
 		}
 		return RESULT_OK;
 	}
-	else if (isEscaped == false) {
+	else if (!isEscaped) {
 		if (m_unescapeState != 1)
 			return RESULT_ERR_ESC; // invalid unescape state
 		m_data.push_back(value);
@@ -244,6 +242,6 @@ unsigned char getMasterNumber(unsigned char addr) {
 }
 
 bool isValidAddress(unsigned char addr, bool allowBroadcast) {
-	return addr != SYN && addr != ESC && (allowBroadcast == true || addr != BROADCAST);
+	return addr != SYN && addr != ESC && (allowBroadcast || addr != BROADCAST);
 }
 

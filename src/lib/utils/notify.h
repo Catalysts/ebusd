@@ -1,5 +1,6 @@
 /*
- * Copyright (C) Roland Jax 2012-2014 <ebusd@liwest.at>
+ * Copyright (C) Roland Jax 2012-2014 <ebusd@liwest.at>,
+ * John Baier 2014-2015 <ebusd@johnm.de>
  *
  * This file is part of ebusd.
  *
@@ -23,31 +24,44 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+/** \file notify.h */
+
 /**
- * @brief class to notify other thread per pipe.
+ * class to notify other thread per pipe.
  */
 class Notify
 {
 
 public:
 	/**
-	 * @brief constructs a new instance and do notifying.
+	 * constructs a new instance and do notifying.
 	 */
-	Notify();
+	Notify()
+	{
+		int pipefd[2];
+		int ret = pipe(pipefd);
+
+		if (ret == 0) {
+			m_recvfd = pipefd[0];
+			m_sendfd = pipefd[1];
+
+			fcntl(m_sendfd, F_SETFL, O_NONBLOCK);
+		}
+	}
 
 	/**
-	 * @brief destructor.
+	 * destructor.
 	 */
-	~Notify();
+	~Notify() { close(m_sendfd); close(m_recvfd); }
 
 	/**
-	 * @brief file descriptor to watch for notify event.
+	 * file descriptor to watch for notify event.
 	 * @return the notification value.
 	 */
 	int notifyFD() { return m_recvfd; }
 
 	/**
-	 * @brief write notify event to file descriptor.
+	 * write notify event to file descriptor.
 	 * @return result of writing notification.
 	 */
 	int notify() const { return write(m_sendfd,"1",1); }
